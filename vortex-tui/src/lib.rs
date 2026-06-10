@@ -45,6 +45,8 @@ pub mod query;
 pub mod segments;
 #[cfg(feature = "native")]
 pub mod tree;
+#[cfg(feature = "native")]
+pub mod visualize;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
@@ -80,6 +82,8 @@ mod native_cli {
         Query(super::query::QueryArgs),
         /// Display segment information for a Vortex file
         Segments(super::segments::SegmentsArgs),
+        /// Generate an HTML visualization of a Vortex file's byte layout
+        Visualize(super::visualize::VisualizeArgs),
     }
 
     impl Commands {
@@ -94,6 +98,7 @@ mod native_cli {
                 Commands::Inspect(args) => &args.file,
                 Commands::Query(args) => &args.file,
                 Commands::Segments(args) => &args.file,
+                Commands::Visualize(args) => &args.file,
             }
         }
     }
@@ -149,6 +154,7 @@ mod native_cli {
             Commands::Inspect(args) => super::inspect::exec_inspect(session, args).await?,
             Commands::Query(args) => super::query::exec_query(session, args).await?,
             Commands::Segments(args) => super::segments::exec_segments(session, args).await?,
+            Commands::Visualize(args) => super::visualize::exec_visualize(session, args).await?,
         };
 
         Ok(())

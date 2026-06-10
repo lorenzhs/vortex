@@ -84,7 +84,7 @@ fn segments_by_name_impl(
                         .map(|n| format!("{n}.{aux_name}").into())
                         .unwrap_or_else(|| aux_name.into()),
                 ),
-                Some(0),
+                row_offset,
                 segments,
                 segment_tree,
             )?,
