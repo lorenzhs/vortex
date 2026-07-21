@@ -152,6 +152,28 @@ impl BtrBlocksCompressorBuilder {
         builder
     }
 
+    /// Adds LZ4 schemes for string and binary compression.
+    ///
+    /// LZ4 offers much faster (de)compression than Zstd at a lower compression ratio, making it a
+    /// good fit for decode-bound workloads. This is the LZ4 analogue of [`with_compact`], and the
+    /// two can be combined if desired. Requires the `lz4` feature.
+    ///
+    /// The LZ4 schemes participate in the same sample-based selection as every other scheme, so a
+    /// column is only stored as LZ4 when that beats the lightweight encodings. When dictionary
+    /// encoding wins the outer layer, the cascade can still choose LZ4 for the dictionary values,
+    /// yielding `Dict(codes, Lz4(values))`.
+    ///
+    /// [`with_compact`]: Self::with_compact
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the LZ4 schemes are already present.
+    #[cfg(feature = "lz4")]
+    pub fn with_compact_lz4(self) -> Self {
+        self.with_new_scheme(&string::Lz4Scheme)
+            .with_new_scheme(&binary::Lz4Scheme)
+    }
+
     /// Excludes schemes without CUDA kernel support and adds Zstd for string and binary compression.
     ///
     /// With the `unstable_encodings` feature, buffer-level Zstd compression is used which

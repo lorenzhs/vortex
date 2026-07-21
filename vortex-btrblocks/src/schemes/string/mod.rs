@@ -6,6 +6,8 @@
 mod fsst;
 mod sparse;
 
+#[cfg(feature = "lz4")]
+mod lz4;
 #[cfg(feature = "zstd")]
 mod zstd;
 #[cfg(all(feature = "zstd", feature = "unstable_encodings"))]
@@ -15,6 +17,8 @@ mod zstd_buffers;
 mod onpair;
 
 pub use fsst::FSSTScheme;
+#[cfg(feature = "lz4")]
+pub use lz4::Lz4Scheme;
 #[cfg(feature = "unstable_encodings")]
 pub use onpair::OnPairScheme;
 pub use sparse::NullDominatedSparseScheme;

@@ -57,6 +57,8 @@ use vortex_layout::layouts::table::TableStrategy;
 use vortex_layout::layouts::table::use_experimental_list_layout;
 use vortex_layout::layouts::zoned::writer::ZonedLayoutOptions;
 use vortex_layout::layouts::zoned::writer::ZonedStrategy;
+#[cfg(feature = "lz4")]
+use vortex_lz4::Lz4;
 #[cfg(feature = "unstable_encodings")]
 use vortex_onpair::OnPair;
 use vortex_pco::Pco;
@@ -127,6 +129,8 @@ pub static ALLOWED_ENCODINGS: LazyLock<HashSet<ArrayId>> = LazyLock::new(|| {
     allowed.insert(Zstd.id());
     #[cfg(all(feature = "zstd", feature = "unstable_encodings"))]
     allowed.insert(ZstdBuffers.id());
+    #[cfg(feature = "lz4")]
+    allowed.insert(Lz4.id());
 
     allowed
 });

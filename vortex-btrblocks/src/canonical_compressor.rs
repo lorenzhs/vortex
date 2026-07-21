@@ -82,7 +82,7 @@ mod tests {
     use vortex_session::VortexSession;
 
     use crate::BtrBlocksCompressor;
-    #[cfg(feature = "zstd")]
+    #[cfg(any(feature = "zstd", feature = "lz4"))]
     use crate::BtrBlocksCompressorBuilder;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
@@ -290,6 +290,86 @@ mod tests {
             compressed.is::<vortex_zstd::ZstdBuffers>(),
             "expected ZstdBuffers, got {}",
             compressed.encoding_id()
+        );
+        assert_arrays_eq!(compressed, array, &mut ctx);
+        Ok(())
+    }
+
+    /// Collect the encoding ids of `array` and all its transitive children.
+    #[cfg(feature = "lz4")]
+    fn collect_encoding_ids(array: &vortex_array::ArrayRef) -> Vec<String> {
+        let mut ids = vec![array.encoding_id().to_string()];
+        for child in array.children() {
+            ids.extend(collect_encoding_ids(&child));
+        }
+        ids
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn test_compact_lz4_binary_compressed() -> VortexResult<()> {
+        // Binary data with a shared prefix but unique suffixes: dictionary encoding cannot help
+        // (every value is distinct), so LZ4 wins the compact contest. Binary avoids the string-only
+        // FSST scheme, keeping the outcome deterministic (mirrors the zstd binary test).
+        let values = (0..1024)
+            .map(|idx| {
+                let mut value = Vec::from(&b"common binary payload prefix "[..]);
+                value.extend_from_slice(&(idx as u32).to_le_bytes());
+                value.extend_from_slice(&[b'x'; 96]);
+                value
+            })
+            .collect::<Vec<_>>();
+        let array = VarBinViewArray::from_iter(
+            values.iter().map(|value| Some(value.as_slice())),
+            DType::Binary(Nullability::NonNullable),
+        );
+
+        let compressor = BtrBlocksCompressorBuilder::default()
+            .with_compact_lz4()
+            .build();
+        let mut ctx = SESSION.create_execution_ctx();
+        let compressed = compressor.compress(&array.clone().into_array(), &mut ctx)?;
+
+        assert!(
+            compressed.is::<vortex_lz4::Lz4>(),
+            "expected Lz4, got {}",
+            compressed.encoding_id()
+        );
+        assert_arrays_eq!(compressed, array, &mut ctx);
+        Ok(())
+    }
+
+    /// Proves that the cascade composes dictionary encoding before LZ4: a low-cardinality column
+    /// of individually-compressible values is dict-encoded, and the dictionary *values* child is
+    /// then chosen to be LZ4, yielding `Dict(codes, Lz4(values))`.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn test_dict_then_lz4_cascade() -> VortexResult<()> {
+        // 16 distinct values, each individually highly compressible (a long run of one byte), each
+        // repeated across many rows. Dictionary encoding wins the outer layer (16 unique values,
+        // 4096 rows); the unique values are individually compressible, so LZ4 wins the values
+        // child. Binary keeps FSST out of the contest.
+        let distinct = (0..16u8).map(|b| vec![b'a' + b; 256]).collect::<Vec<_>>();
+        let values = (0..4096)
+            .map(|idx| Some(distinct[idx % distinct.len()].as_slice()))
+            .collect::<Vec<_>>();
+        let array = VarBinViewArray::from_iter(values, DType::Binary(Nullability::NonNullable));
+
+        let compressor = BtrBlocksCompressorBuilder::default()
+            .with_compact_lz4()
+            .build();
+        let mut ctx = SESSION.create_execution_ctx();
+        let compressed = compressor.compress(&array.clone().into_array(), &mut ctx)?;
+
+        let ids = collect_encoding_ids(&compressed);
+        assert!(
+            compressed.is::<Dict>(),
+            "expected a Dict at the top of the cascade, got {}",
+            compressed.encoding_id()
+        );
+        assert!(
+            ids.iter().any(|id| id == "vortex.lz4"),
+            "expected a vortex.lz4 array in the cascade, got tree {ids:?}"
         );
         assert_arrays_eq!(compressed, array, &mut ctx);
         Ok(())

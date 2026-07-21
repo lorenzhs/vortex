@@ -47,6 +47,7 @@ vortex-runend = { workspace = true }
 vortex-scan = { workspace = true }
 vortex-sequence = { workspace = true }
 vortex-session = { workspace = true }
+vortex-lz4 = { workspace = true, optional = true }
 vortex-sparse = { workspace = true }
 vortex-tensor = { workspace = true, optional = true }
 vortex-utils = { workspace = true }
@@ -79,6 +80,7 @@ tokio = [
     "vortex-layout/tokio",
 ]
 zstd = ["dep:vortex-zstd", "vortex-file?/zstd"]
+lz4 = ["dep:vortex-lz4", "vortex-file?/lz4"]
 pretty = ["vortex-array/table-display"]
 serde = ["vortex-array/serde", "vortex-buffer/serde", "vortex-mask/serde"]
 # This feature enabled unstable encodings for which we don't guarantee stability.

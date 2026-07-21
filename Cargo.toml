@@ -57,6 +57,7 @@ members = [
     "encodings/sparse",
     "encodings/zigzag",
     "encodings/zstd",
+    "encodings/lz4",
     "encodings/bytebool",
     "encodings/parquet-variant",
     # Experimental encodings
@@ -180,6 +181,11 @@ lending-iterator = "0.1.7"
 libfuzzer-sys = "0.4"
 libloading = "0.8"
 liblzma = "0.4"
+lz4_flex = { version = "0.11", default-features = false, features = [
+    "std",
+    "safe-encode",
+    "safe-decode",
+] }
 log = { version = "0.4.21" }
 memchr = "2.8.0"
 memmap2 = "0.9.5"
@@ -321,6 +327,7 @@ vortex-tensor = { version = "0.1.0", path = "./vortex-tensor", default-features 
 vortex-utils = { version = "0.1.0", path = "./vortex-utils", default-features = false }
 vortex-zigzag = { version = "0.1.0", path = "./encodings/zigzag", default-features = false }
 vortex-zstd = { version = "0.1.0", path = "./encodings/zstd", default-features = false }
+vortex-lz4 = { version = "0.1.0", path = "./encodings/lz4", default-features = false }
 # END crates published by this project
 
 # No version constraints for unpublished crates.

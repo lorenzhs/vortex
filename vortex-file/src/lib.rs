@@ -176,6 +176,8 @@ pub fn register_default_encodings(session: &VortexSession) {
         arrays.register(vortex_zstd::Zstd);
         #[cfg(all(feature = "zstd", feature = "unstable_encodings"))]
         arrays.register(vortex_zstd::ZstdBuffers);
+        #[cfg(feature = "lz4")]
+        arrays.register(vortex_lz4::Lz4);
         if use_experimental_patches() {
             arrays.register(Patched);
         }

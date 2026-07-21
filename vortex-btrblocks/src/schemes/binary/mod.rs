@@ -3,12 +3,16 @@
 
 //! Binary compression schemes.
 
+#[cfg(feature = "lz4")]
+mod lz4;
 #[cfg(feature = "zstd")]
 mod zstd;
 #[cfg(all(feature = "zstd", feature = "unstable_encodings"))]
 mod zstd_buffers;
 
 // Re-export builtin schemes from vortex-compressor.
+#[cfg(feature = "lz4")]
+pub use lz4::Lz4Scheme;
 pub use vortex_compressor::builtins::BinaryDictScheme;
 #[cfg(feature = "zstd")]
 pub use zstd::ZstdScheme;

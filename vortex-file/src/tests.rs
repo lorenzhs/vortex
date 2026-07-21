@@ -1693,6 +1693,50 @@ async fn write_read_roundtrip(array: ArrayRef) -> VortexResult<ArrayRef> {
         .await
 }
 
+/// End-to-end proof that the LZ4 compact profile round-trips through a real file: the writer emits
+/// `vortex.lz4` arrays (writer allow-list wiring) and the reader reconstructs them via the default
+/// registry (reader registration wiring).
+#[cfg(feature = "lz4")]
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn lz4_compact_profile_roundtrip() -> VortexResult<()> {
+    // Binary values with a shared prefix but unique suffixes: LZ4 wins the compact contest.
+    let values = (0..2048)
+        .map(|idx| {
+            let mut value = Vec::from(&b"common binary payload prefix "[..]);
+            value.extend_from_slice(&(idx as u32).to_le_bytes());
+            value.extend_from_slice(&[b'z'; 64]);
+            value
+        })
+        .collect::<Vec<_>>();
+    let column = VarBinViewArray::from_iter(
+        values.iter().map(|v| Some(v.as_slice())),
+        DType::Binary(Nullability::NonNullable),
+    )
+    .into_array();
+    let table = StructArray::from_fields(&[("payload", column)])?.into_array();
+
+    let strategy = crate::strategy::WriteStrategyBuilder::default()
+        .with_btrblocks_builder(BtrBlocksCompressorBuilder::default().with_compact_lz4())
+        .build();
+    let mut buf = ByteBufferMut::empty();
+    SESSION
+        .write_options()
+        .with_strategy(strategy)
+        .write(&mut buf, table.to_array_stream())
+        .await?;
+    let result = SESSION
+        .open_options()
+        .open_buffer(buf)?
+        .scan()?
+        .into_array_stream()?
+        .read_all()
+        .await?;
+
+    assert_arrays_eq!(result, table, &mut SESSION.create_execution_ctx());
+    Ok(())
+}
+
 /// A `list<list<i32>>` column round-trips through the `TableStrategy` dispatcher, exercising list
 /// decomposition recursing into itself (the outer list's `elements` are themselves lists).
 #[tokio::test]

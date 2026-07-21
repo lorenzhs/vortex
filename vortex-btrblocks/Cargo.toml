@@ -29,6 +29,7 @@ vortex-decimal-byte-parts = { workspace = true }
 vortex-error = { workspace = true }
 vortex-fastlanes = { workspace = true }
 vortex-fsst = { workspace = true }
+vortex-lz4 = { workspace = true, optional = true }
 vortex-onpair = { workspace = true, optional = true }
 vortex-pco = { workspace = true, optional = true }
 vortex-runend = { workspace = true }
@@ -51,6 +52,7 @@ vortex-session = { workspace = true }
 unstable_encodings = ["dep:vortex-onpair", "vortex-zstd?/unstable_encodings"]
 pco = ["dep:pco", "dep:vortex-pco"]
 zstd = ["dep:vortex-zstd"]
+lz4 = ["dep:vortex-lz4"]
 
 [lints]
 workspace = true

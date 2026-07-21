@@ -56,6 +56,7 @@ vortex-session = { workspace = true }
 vortex-sparse = { workspace = true }
 vortex-tensor = { workspace = true, optional = true }
 vortex-utils = { workspace = true, features = ["dashmap"] }
+vortex-lz4 = { workspace = true, optional = true }
 vortex-zigzag = { workspace = true }
 vortex-zstd = { workspace = true, optional = true }
 
@@ -79,6 +80,7 @@ tokio = [
     "vortex-layout/tokio",
 ]
 zstd = ["dep:vortex-zstd", "vortex-btrblocks/zstd", "vortex-btrblocks/pco"]
+lz4 = ["dep:vortex-lz4", "vortex-btrblocks/lz4"]
 # This feature enables unstable encodings for which we don't guarantee stability.
 unstable_encodings = [
     "dep:vortex-onpair",

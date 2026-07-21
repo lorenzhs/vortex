@@ -283,6 +283,12 @@ pub mod encodings {
     pub mod zstd {
         pub use vortex_zstd::*;
     }
+
+    #[cfg(feature = "lz4")]
+    /// LZ4-backed binary/string compression encodings.
+    pub mod lz4 {
+        pub use vortex_lz4::*;
+    }
 }
 
 /// Extension trait to create a default Vortex session.
