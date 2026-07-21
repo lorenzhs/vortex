@@ -347,6 +347,22 @@ impl Zstd {
             .data()
             .decompress(array.dtype(), &unsliced_validity, ctx)
     }
+
+    /// Decompress a `Utf8`/`Binary` [`ZstdArray`]'s values straight into a caller-owned buffer,
+    /// bypassing canonicalization. See [`ZstdData::decompress_var_bin_into`].
+    pub fn decompress_var_bin_into(
+        array: &ZstdArray,
+        ctx: &mut ExecutionCtx,
+        out: &mut Vec<u8>,
+    ) -> VortexResult<VarBinDecompressed> {
+        let unsliced_validity = child_to_validity(
+            array.as_ref().slots()[0].as_ref(),
+            array.dtype().nullability(),
+        );
+        array
+            .data()
+            .decompress_var_bin_into(&unsliced_validity, ctx, out)
+    }
 }
 
 /// The validity bitmap indicating which elements are non-null.
@@ -398,6 +414,30 @@ struct Frames {
     dictionary: Option<ByteBuffer>,
     frames: Vec<ByteBuffer>,
     frame_metas: Vec<ZstdFrameMetadata>,
+}
+
+/// The frames overlapping a slice, selected by [`ZstdData::plan_frames`] without decompressing.
+struct FramePlan<'a> {
+    /// `(compressed frame, its uncompressed size)` for each frame overlapping the slice, in order.
+    frames: Vec<(&'a ByteBuffer, usize)>,
+    /// Sum of the selected frames' uncompressed sizes.
+    total_uncompressed: usize,
+    /// Values in frames that precede the first selected frame (skipped entirely).
+    n_skipped_values: usize,
+    /// Value index (non-null value count) at the start of the slice.
+    slice_value_idx_start: usize,
+    /// Value index (non-null value count) at the end of the slice.
+    slice_value_idx_stop: usize,
+}
+
+/// Value-index window produced by [`ZstdData::decompress_var_bin_into`]: within the decompressed
+/// `[ViewLen][bytes]` stream written to the caller's buffer, the slice's values are the `n_values`
+/// values that follow the first `skip_values` values.
+pub struct VarBinDecompressed {
+    /// Leading values in the buffer (from the head frame) that precede the slice.
+    pub skip_values: usize,
+    /// Values belonging to the slice.
+    pub n_values: usize,
 }
 
 fn choose_max_dict_size(uncompressed_size: usize) -> usize {
@@ -907,41 +947,11 @@ impl ZstdData {
         // what row offset into the first such frame.
         let byte_width = Self::byte_width(dtype);
         let slice_n_rows = self.slice_stop - self.slice_start;
-        let slice_value_indices = unsliced_validity
-            .execute_mask(self.unsliced_n_rows, ctx)?
-            .valid_counts_for_indices(&[self.slice_start, self.slice_stop]);
-
-        let slice_value_idx_start = slice_value_indices[0];
-        let slice_value_idx_stop = slice_value_indices[1];
-
-        let mut frames_to_decompress = vec![];
-        let mut value_idx_start = 0;
-        let mut uncompressed_size_to_decompress = 0;
-        let mut n_skipped_values = 0;
-        for (frame, frame_meta) in self.frames.iter().zip(&self.metadata.frames) {
-            if value_idx_start >= slice_value_idx_stop {
-                break;
-            }
-
-            let frame_uncompressed_size = usize::try_from(frame_meta.uncompressed_size)
-                .vortex_expect("Uncompressed size must fit in usize");
-            let frame_n_values = if frame_meta.n_values == 0 {
-                // possibly older primitive-only metadata that just didn't store this
-                frame_uncompressed_size / byte_width
-            } else {
-                usize::try_from(frame_meta.n_values).vortex_expect("frame size must fit usize")
-            };
-
-            let value_idx_stop = value_idx_start + frame_n_values;
-            if value_idx_stop > slice_value_idx_start {
-                // we need this frame
-                frames_to_decompress.push(frame);
-                uncompressed_size_to_decompress += frame_uncompressed_size;
-            } else {
-                n_skipped_values += frame_n_values;
-            }
-            value_idx_start = value_idx_stop;
-        }
+        let plan = self.plan_frames(byte_width, unsliced_validity, ctx)?;
+        let slice_value_idx_start = plan.slice_value_idx_start;
+        let slice_value_idx_stop = plan.slice_value_idx_stop;
+        let n_skipped_values = plan.n_skipped_values;
+        let uncompressed_size_to_decompress = plan.total_uncompressed;
 
         // then we actually decompress those frames
         let mut decompressor = if let Some(dictionary) = &self.dictionary {
@@ -959,7 +969,7 @@ impl ZstdData {
             decompressed.set_len(uncompressed_size_to_decompress);
         }
         let mut uncompressed_start = 0;
-        for frame in frames_to_decompress {
+        for (frame, _) in &plan.frames {
             let uncompressed_written = decompressor
                 .decompress_to_buffer(frame.as_slice(), &mut decompressed[uncompressed_start..])?;
             uncompressed_start += uncompressed_written;
@@ -1065,6 +1075,105 @@ impl ZstdData {
             }
             _ => vortex_panic!("Unsupported dtype for Zstd array: {}", dtype),
         }
+    }
+
+    /// Select the frames overlapping this array's slice, without decompressing. Shared by
+    /// [`ZstdData::decompress`] (Arrow path) and [`ZstdData::decompress_var_bin_into`] (native
+    /// path).
+    fn plan_frames(
+        &self,
+        byte_width: usize,
+        unsliced_validity: &Validity,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<FramePlan<'_>> {
+        let slice_value_indices = unsliced_validity
+            .execute_mask(self.unsliced_n_rows, ctx)?
+            .valid_counts_for_indices(&[self.slice_start, self.slice_stop]);
+        let slice_value_idx_start = slice_value_indices[0];
+        let slice_value_idx_stop = slice_value_indices[1];
+
+        let mut frames = vec![];
+        let mut value_idx_start = 0;
+        let mut total_uncompressed = 0;
+        let mut n_skipped_values = 0;
+        for (frame, frame_meta) in self.frames.iter().zip(&self.metadata.frames) {
+            if value_idx_start >= slice_value_idx_stop {
+                break;
+            }
+
+            let frame_uncompressed_size = usize::try_from(frame_meta.uncompressed_size)
+                .vortex_expect("Uncompressed size must fit in usize");
+            let frame_n_values = if frame_meta.n_values == 0 {
+                // possibly older primitive-only metadata that just didn't store this
+                frame_uncompressed_size / byte_width
+            } else {
+                usize::try_from(frame_meta.n_values).vortex_expect("frame size must fit usize")
+            };
+
+            let value_idx_stop = value_idx_start + frame_n_values;
+            if value_idx_stop > slice_value_idx_start {
+                // we need this frame
+                frames.push((frame, frame_uncompressed_size));
+                total_uncompressed += frame_uncompressed_size;
+            } else {
+                n_skipped_values += frame_n_values;
+            }
+            value_idx_start = value_idx_stop;
+        }
+
+        Ok(FramePlan {
+            frames,
+            total_uncompressed,
+            n_skipped_values,
+            slice_value_idx_start,
+            slice_value_idx_stop,
+        })
+    }
+
+    /// Decompress the frames overlapping this array's slice straight into `out` (a caller-owned
+    /// buffer reused across chunks), producing the raw `[ViewLen u32 LE][value bytes]` stream that
+    /// [`reconstruct_views`] reads. Only valid for `Utf8`/`Binary` arrays (byte width 1).
+    ///
+    /// Unlike [`ZstdData::decompress`], this hands back no aliasing `VarBinView`, so `out` is free to
+    /// be overwritten on the next chunk. Null values are not stored inline, so `out` holds only the
+    /// non-null values in order; the returned [`VarBinDecompressed`] gives the value-index window
+    /// `[skip_values, skip_values + n_values)` within `out` that belongs to this slice.
+    pub fn decompress_var_bin_into(
+        &self,
+        unsliced_validity: &Validity,
+        ctx: &mut ExecutionCtx,
+        out: &mut Vec<u8>,
+    ) -> VortexResult<VarBinDecompressed> {
+        let plan = self.plan_frames(1, unsliced_validity, ctx)?;
+        let mut decompressor = if let Some(dictionary) = &self.dictionary {
+            zstd::bulk::Decompressor::with_dictionary(dictionary)?
+        } else {
+            zstd::bulk::Decompressor::new()?
+        };
+        out.clear();
+        out.reserve(plan.total_uncompressed);
+        // SAFETY: the fill loop below writes exactly `total_uncompressed` bytes (checked), mirroring
+        // the `set_len` + fill pattern in `decompress`.
+        unsafe {
+            out.set_len(plan.total_uncompressed);
+        }
+        let mut uncompressed_start = 0;
+        for (frame, _) in &plan.frames {
+            let written = decompressor
+                .decompress_to_buffer(frame.as_slice(), &mut out[uncompressed_start..])?;
+            uncompressed_start += written;
+        }
+        if uncompressed_start != plan.total_uncompressed {
+            vortex_panic!(
+                "Zstd metadata or frames were corrupt; expected {} bytes but decompressed {}",
+                plan.total_uncompressed,
+                uncompressed_start
+            );
+        }
+        Ok(VarBinDecompressed {
+            skip_values: plan.slice_value_idx_start - plan.n_skipped_values,
+            n_values: plan.slice_value_idx_stop - plan.slice_value_idx_start,
+        })
     }
 
     /// Returns the length of the array.
