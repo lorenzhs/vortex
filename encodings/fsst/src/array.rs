@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hasher;
+use std::iter::repeat_n;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -65,6 +66,9 @@ use crate::rules::RULES;
 
 /// A [`FSST`]-encoded Vortex array.
 pub type FSSTArray = Array<FSST>;
+
+/// Number of codes that index the symbol table. [`fsst::ESCAPE_CODE`] is the only one that doesn't.
+const FSST_SYMBOL_TABLE_CODES: usize = fsst::ESCAPE_CODE as usize;
 
 #[derive(Clone, prost::Message)]
 pub struct FSSTMetadata {
@@ -421,6 +425,8 @@ pub(crate) struct FSSTSymbolTable {
     symbol_lengths: Buffer<u8>,
     /// Memoized compressor used for push-down of compute by compressing the RHS.
     compressor: OnceLock<Compressor>,
+    /// Memoized table padded to every code, see [`FSSTSymbolTable::padded`].
+    padded: OnceLock<(Buffer<Symbol>, Buffer<u8>)>,
 }
 
 impl FSSTSymbolTable {
@@ -429,6 +435,7 @@ impl FSSTSymbolTable {
             symbols,
             symbol_lengths,
             compressor: OnceLock::new(),
+            padded: OnceLock::new(),
         }
     }
 
@@ -436,6 +443,31 @@ impl FSSTSymbolTable {
         self.compressor.get_or_init(|| {
             Compressor::rebuild_from(self.symbols.as_slice(), self.symbol_lengths.as_slice())
         })
+    }
+
+    /// The table padded to every code with zero-length symbols.
+    ///
+    /// [`Decompressor`] looks both slices up with `get_unchecked` on a code byte, and nothing
+    /// between the file and that lookup bounds a code against the symbol count. Padding keeps any
+    /// code in bounds: a code past the real symbols decodes to nothing, which the caller's
+    /// decoded-length check rejects.
+    fn padded(&self) -> (&[Symbol], &[u8]) {
+        let (symbols, symbol_lengths) = self.padded.get_or_init(|| {
+            let padding = FSST_SYMBOL_TABLE_CODES.saturating_sub(self.symbols.len());
+            (
+                self.symbols
+                    .iter()
+                    .copied()
+                    .chain(repeat_n(Symbol::ZERO, padding))
+                    .collect(),
+                self.symbol_lengths
+                    .iter()
+                    .copied()
+                    .chain(repeat_n(0, padding))
+                    .collect(),
+            )
+        });
+        (symbols.as_slice(), symbol_lengths.as_slice())
     }
 }
 
@@ -809,8 +841,12 @@ impl FSSTData {
 
     /// Build a [`Decompressor`] that can be used to decompress values from
     /// this array.
+    ///
+    /// The decompressor is built over the padded symbol table, so codes from a corrupt file cannot
+    /// index past it.
     pub fn decompressor(&self) -> Decompressor<'_> {
-        Decompressor::new(self.symbols().as_slice(), self.symbol_lengths().as_slice())
+        let (symbols, symbol_lengths) = self.symbol_table.padded();
+        Decompressor::new(symbols, symbol_lengths)
     }
 
     /// Retrieves the FSST compressor.

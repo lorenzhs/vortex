@@ -92,12 +92,19 @@ pub(crate) fn fsst_decode_views(
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::cast_possible_truncation)]
+
+    use std::iter::repeat_n;
     use std::sync::LazyLock;
 
+    use fsst::ESCAPE_CODE;
+    use fsst::Symbol;
     use rand::RngExt;
     use rand::SeedableRng;
     use rand::prelude::StdRng;
+    use rstest::rstest;
     use vortex_array::ArrayRef;
+    use vortex_array::ExecutionCtx;
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
     use vortex_array::arrays::ChunkedArray;
@@ -110,16 +117,94 @@ mod tests {
     use vortex_array::builders::VarBinViewBuilder;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
+    use vortex_buffer::Buffer;
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
     use super::fsst_decode_bytes;
     use crate::FSST;
+    use crate::FSSTArray;
     use crate::FSSTArrayExt;
     use crate::fsst_compress;
     use crate::fsst_train_compressor;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
+
+    /// One row of `n` escaped bytes, the encoding used when no symbols were trained.
+    fn all_escape_codes(n: usize) -> Vec<u8> {
+        repeat_n([ESCAPE_CODE, b'a'], n).flatten().collect()
+    }
+
+    /// A single-row FSST array over a hand-written symbol table and code stream.
+    fn fsst_from_parts(
+        symbols: &[Symbol],
+        symbol_lengths: &[u8],
+        codes: Vec<u8>,
+        uncompressed_length: i32,
+        ctx: &mut ExecutionCtx,
+    ) -> VortexResult<FSSTArray> {
+        let dtype = DType::Binary(Nullability::NonNullable);
+        FSST::try_new(
+            dtype.clone(),
+            Buffer::copy_from(symbols),
+            Buffer::copy_from(symbol_lengths),
+            VarBinArray::from_iter([Some(codes.into_boxed_slice())], dtype),
+            PrimitiveArray::from_iter([uncompressed_length]).into_array(),
+            ctx,
+        )
+    }
+
+    /// Enough escaped bytes that [`CORRUPT_CODE_INDEX`] falls in the decoder's 8-bytes-at-a-time
+    /// loop, which bounds its output only by assuming every symbol length is in range. That loop
+    /// stops 64 bytes short of the end, and the tail loop it hands off to asserts each write.
+    const ESCAPED_BYTES: usize = 200;
+
+    /// Index of the escape marker to overwrite, in the code stream rather than the output.
+    const CORRUPT_CODE_INDEX: usize = 40;
+
+    #[rstest]
+    #[case::empty_symbol_table(&[], &[], 84)]
+    #[case::code_past_short_symbol_table(
+        &[Symbol::from_slice(b"ab______"), Symbol::from_slice(b"cd______")], &[2, 2], 200
+    )]
+    fn test_rejects_code_past_symbol_table(
+        #[case] symbols: &[Symbol],
+        #[case] symbol_lengths: &[u8],
+        #[case] code: u8,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let mut codes = all_escape_codes(ESCAPED_BYTES);
+        // Overwrite an escape marker, so the byte it escaped is read as a code too.
+        codes[CORRUPT_CODE_INDEX] = code;
+
+        let array = fsst_from_parts(
+            symbols,
+            symbol_lengths,
+            codes,
+            ESCAPED_BYTES as i32,
+            &mut ctx,
+        )?;
+        assert!(fsst_decode_bytes(array.as_view(), &mut ctx).is_err());
+        Ok(())
+    }
+
+    /// An empty symbol table is not corruption: low-cardinality columns train no symbols and
+    /// encode as pure escapes, so this must keep decoding.
+    #[test]
+    fn test_decodes_all_escapes_with_empty_symbol_table() -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let array = fsst_from_parts(
+            &[],
+            &[],
+            all_escape_codes(ESCAPED_BYTES),
+            ESCAPED_BYTES as i32,
+            &mut ctx,
+        )?;
+
+        let (bytes, _) = fsst_decode_bytes(array.as_view(), &mut ctx)?;
+        assert_eq!(bytes.as_slice(), vec![b'a'; ESCAPED_BYTES].as_slice());
+        Ok(())
+    }
 
     fn make_data() -> (VarBinArray, Vec<Option<Vec<u8>>>) {
         const STRING_COUNT: usize = 1000;
