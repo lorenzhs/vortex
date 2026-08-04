@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use num_traits::ToPrimitive;
 use vortex_array::ArrayRef;
 use vortex_array::ArrayView;
 use vortex_array::ExecutionCtx;
@@ -19,6 +20,7 @@ use vortex_buffer::ByteBuffer;
 use vortex_buffer::ByteBufferMut;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
+use vortex_error::vortex_err;
 
 use crate::FSST;
 use crate::FSSTArrayExt;
@@ -52,16 +54,25 @@ pub(crate) fn fsst_decode_bytes(
         .clone()
         .execute::<PrimitiveArray>(ctx)?;
 
-    #[expect(clippy::cast_possible_truncation)]
-    let total_size: usize = match_each_integer_ptype!(uncompressed_lens_array.ptype(), |P| {
+    let declared_size = match_each_integer_ptype!(uncompressed_lens_array.ptype(), |P| {
         uncompressed_lens_array
             .as_slice::<P>()
             .iter()
-            .map(|x| *x as usize)
-            .sum()
+            .try_fold(0_u64, |total, len| len.to_u64()?.checked_add(total))
+            .ok_or_else(|| vortex_err!("FSST uncompressed lengths are negative or sum past u64"))?
     });
 
     let decompressor = fsst_array.decompressor();
+    let total_size = usize::try_from(declared_size)
+        .map_err(|_| vortex_err!("FSST declares {declared_size} uncompressed bytes"))?;
+    // Each code emits at most one 8-byte symbol and each escape pair exactly one byte, so this
+    // ceiling is exact: a larger declared size cannot be honest, and must not size the allocation.
+    let max_size = decompressor.max_decompression_capacity(bytes.as_slice());
+    vortex_ensure!(
+        total_size <= max_size,
+        "FSST declares {total_size} uncompressed bytes, but {} codes decode to at most {max_size}",
+        bytes.len()
+    );
     let mut uncompressed_bytes = ByteBufferMut::with_capacity(total_size + 7);
     let len =
         decompressor.decompress_into(bytes.as_slice(), uncompressed_bytes.spare_capacity_mut());
@@ -185,6 +196,27 @@ mod tests {
             &mut ctx,
         )?;
         assert!(fsst_decode_bytes(array.as_view(), &mut ctx).is_err());
+        Ok(())
+    }
+
+    /// A declared size the codes cannot possibly produce must be refused before it sizes the
+    /// decode buffer, or it drives an allocation straight to `handle_alloc_error`.
+    #[rstest]
+    #[case::past_expansion_ceiling(i32::MAX, "decode to at most")]
+    #[case::negative(-1, "negative")]
+    fn test_rejects_unachievable_uncompressed_length(
+        #[case] uncompressed_length: i32,
+        #[case] expected: &str,
+    ) -> VortexResult<()> {
+        let mut ctx = SESSION.create_execution_ctx();
+        let array = fsst_from_parts(&[], &[], all_escape_codes(4), uncompressed_length, &mut ctx)?;
+
+        let error = fsst_decode_bytes(array.as_view(), &mut ctx)
+            .expect_err("unachievable uncompressed length must not decode");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
